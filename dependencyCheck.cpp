@@ -25,6 +25,8 @@
 
 #include <string>
 #include <cstdlib>
+#include <iostream>
+#include <unordered_map>
 
 using namespace llvm;
 
@@ -81,36 +83,121 @@ int main(int argc, char **argv) {
 
         DependenceInfo dinfo(funcPtr, &AA, &SE, &LI);
         DataDependenceGraph ddg(*funcPtr, dinfo);
+        ModuleSlotTracker MST(Mod.get(), false);
+        MST.incorporateFunction(*funcPtr);
 
         // find the two assignment nodes
         const Instruction* srcInstruction = nullptr;
+        const DDGNode* srcNode = nullptr;
         const Instruction* destInstruction = nullptr;
-        ModuleSlotTracker MST(Mod.get(), false);
-        MST.incorporateFunction(*funcPtr);
-        SlotTracker* SlotTable = MST.getMachine() ? MST.getMachine() : nullptr;
-        DDGNode** testIt = ddg.begin();
-        while (testIt != ddg.end()) {
-              DDGNode* currNode = *testIt;
-              if (isa<SimpleDDGNode>(currNode)) {
-                    // find all assignment statements
-                    const DDGNode::InstructionListType& currInstructionList = static_cast<SimpleDDGNode*>(currNode)->getInstructions();
-                    for (const Instruction* i : currInstructionList) {
-                          //if (ConstantInt* CI = dyn_cast<ConstantInt>(i)) {
-                          int slotIdx = MST.getLocalSlot(i);
-                          if (slotIdx == SrcVar) {
-                                srcInstruction = i;
+        const DDGNode* destNode = nullptr;
+        //using InstToNodeMap = DenseMap<Instruction*, DDGNode*>;
+        //InstToNodeMap inst2Node;
+        {
+              
+              DDGNode** testIt = ddg.begin();
+              while (testIt != ddg.end()) {
+                    DDGNode* currNode = *testIt;
+                    if (isa<SimpleDDGNode>(currNode)) {
+                          // find all assignment statements
+                          const DDGNode::InstructionListType& currInstructionList = static_cast<SimpleDDGNode*>(currNode)->getInstructions();
+                          for (const Instruction* i : currInstructionList) {
+                                //if (ConstantInt* CI = dyn_cast<ConstantInt>(i)) {
+                                int slotIdx = MST.getLocalSlot(i);
+                                if (slotIdx == SrcVar) {
+                                      srcInstruction = i;
+                                      srcNode = currNode;
+                                }
+                                else if (slotIdx == DestVar) {
+                                      destInstruction = i;
+                                      destNode = currNode;
+                                }
                           }
-                          else if (slotIdx == DestVar) {
-                                destInstruction = i;
+                    }
+                    else if (isa<PiBlockDDGNode>(currNode)) {
+                          ;
+                    }
+                    ++testIt;
+              }
+        }
+        
+        
+        if (!srcNode) {
+              std::cout << "srcNode is nullptr. Exit." << std::endl;
+              exit(0);
+        }
+        if (!destNode) {
+              std::cout << "destNode is nullptr. Exit." << std::endl;
+              exit(0);
+        }
+
+        // search in graph
+        //std::vector<bool> exploredNodes(ddg.size(), false);
+        std::unordered_map<const DDGNode*, bool> exploredNodes;
+        {
+              for (DDGNode** it = ddg.begin(); it < ddg.end(); it++) {
+                    DDGNode* currNode = *it;
+                    exploredNodes[currNode] = false;
+              }
+        }
+        std::vector<const DDGNode*> pendingNodes{srcNode};
+        std::vector<const DDGNode*> currPath;
+
+        while (!pendingNodes.empty()) {
+              // pop
+              const DDGNode* currNode = pendingNodes.back();
+              pendingNodes.pop_back();
+              currPath.push_back(currNode);
+              // destination check
+              if (currNode == destNode) {
+                    break;
+              }
+              // expand and push unvisited nodes
+              auto& edges = currNode->getEdges();
+
+              bool shouldGoBack = true;
+              for (DDGEdge* e : edges) {
+                    if (e->isDefUse()) {
+                          // only analyse def-use edges for now
+                          const DDGNode& target = e->getTargetNode();
+                          if (!exploredNodes[&target]) {
+                                exploredNodes[&target] = true;
+                                shouldGoBack = false;
+                                pendingNodes.push_back(&target);
                           }
                     }
               }
-              else if (isa<PiBlockDDGNode>(currNode)) {
-                    ;
+              if (shouldGoBack) {
+                    // no new nodes are found in this iteration, which means 
+                    // the current node is NOT to be on the correct path.
+                    // We should remove it.
+                    currPath.pop_back();
               }
-
-              ++testIt;
         }
+
+        if (pendingNodes.empty() || currPath.empty())
+              std::cout << "Path is not found." << std::endl;
+        else {
+              std::cout << "Path from " << SrcVar << "to " << DestVar << " is found:";
+              for (auto* node : currPath) {
+                    // get all the slots
+                    if (isa<SimpleDDGNode>(node)) {
+                          const DDGNode::InstructionListType& currInstructionList = static_cast<const SimpleDDGNode*>(node)->getInstructions();
+                          for (const Instruction* i : currInstructionList) {
+                                int slotIdx = MST.getLocalSlot(i);
+                                std::cout << "-> SimpleDDGNode " << slotIdx << std::endl;
+                          }
+
+                    }
+                    else if (isa<PiBlockDDGNode>(node)) {
+                          std::cout << "-> Pi-block node" << std::endl;
+                    }
+              }
+              
+        }
+
+
+
         
 
         // write to file
